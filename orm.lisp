@@ -2,14 +2,14 @@
 
 (defmacro with-database ((host port database username password) &body body)
   `(lw:if-let (*db* (open-connection ,host ,port ,database ,username ,password))
-              (unwind-protect (handler-bind ((error (lambda (e) (clog (princ-to-string e)) (rollback-transaction *db*))))
+              (unwind-protect (handler-bind ((error (lambda (e) (print e) (rollback-transaction *db*))))
                                 (begin-transaction *db*)
                                 (multiple-value-prog1 (progn ,@body)
                                   (commit-transaction *db*)))
                 (close-connection *db*))
               (error "Unable to open database ~S" ,database)))
 
-(defmacro defmodel (table slots &key join search fts user inflate order)
+(defmacro defmodel (table slots &key join search fts params inflate order)
   (labels ((make-slot-from-spec (spec)
              `(,(car spec) :initarg ,(intern (symbol-name (car spec)) "KEYWORD") :accessor ,(car spec) :initform nil))
 
@@ -22,6 +22,9 @@
                  (if (find str reserved :test #'string-equal)
                      (format nil "~(\"~A\"~)" str)
                      (string-downcase str)))))
+
+           (intersperse (el list)
+             (loop for l on list collect (car l) when (cdr l) collect el))
 
            (search-p (spec)
              (or (option-p :search (cddr spec)) (unique-p spec)))
@@ -36,15 +39,21 @@
              (intern (symbol-name sym) "KEYWORD"))
 
            (parameter (sym)
+             "Make the actual value we're passing as a param"
              (if (string-equal sym "LIKE")
                  `(when ,sym (format nil "%~A%" (substitute #\% #\Space ,sym :test #'char=)))
                  sym))
-
+           
            (type-from-list (list)
              (if (keywordp (cadr list))
                  (cadr list)
                  :integer))
 
+           (dedupe-predefined (args)
+             "Remove any args already listed in PARAMS"
+             (let ((predefined (loop for (sym) on params by #'cddr collect sym)))
+               (remove-if (lambda (a) (find (car a) predefined)) args)))
+           
            (initform-from-list (list &key parameter)
              (loop for (sym) in list collect (keyword sym) collect (if parameter (parameter sym) sym)))
 
@@ -56,27 +65,26 @@
                (declare (ignore ignore))
                (list sym type (format nil "~@[~A.~]~A = " (when join (sql table)) (sql sym)) (keyword sym))))
 
+           (make-search-arg (arg)
+             "Make either a plain arg or substitute with PARAM values if available"
+             (lw:if-let (value (getf params (keyword (car arg))))
+                        `(,(car arg) ,value)
+                        (car arg)))
+
            (make-search-by-unique (unique)
              (destructuring-bind (sym &rest ignore) unique
                (declare (ignore ignore))
                (let ((fn (intern (format nil "FIND-~A-BY-~A" table sym))))
-                 `(defun ,fn (,sym ,@(when user '(&key (user (id config:*user*)))))
-                    (car (,(search-fn) ,(keyword sym) ,sym ,@(when user '(:user user)) :limit 1))))))
-
-           (need-user-p (args)
-             (and user (not (find "user" (mapcar (compose #'symbol-name #'car) args) :test #'string-equal))))
-
-           (remove-user (args &optional (key #'identity))
-             (remove "user" args :key (compose #'symbol-name key) :test #'string-equal))
+                 `(defun ,fn (,sym)
+                    (car (,(search-fn) ,(keyword sym) ,sym :limit 1))))))
 
            (make-search (args)
-             `(defun ,(search-fn) (&key ,@(remove-user (mapcar #'car args)) ,@(when user '((user (id config:*user*)))) ,@(when fts '(fts)) limit)
-                (loop for ,(mapcan #'inflated-places slots) in ,(make-query (if (need-user-p args) (cons '(user :integer "u.\"user\" = " :user) args) args))
+             `(defun ,(search-fn) (&key ,@(mapcar #'make-search-arg args) ,@(when fts '(fts)) limit)
+                (loop for ,(mapcan #'inflated-places slots) in ,(make-query args)
                       collect (make-instance ',table ,@(mapcan #'make-initialiser slots)))))
 
            (make-query (args)
-             (let* ((args-with-user (if user (cons '(user :integer "u.\"user\" = " :user) (remove-user args #'car)) args))
-                    (args-with-fts (if fts (cons `(fts :string ,@(make-fts-search-sql fts)) args-with-user) args-with-user)))
+             (let ((args-with-fts (if fts (cons `(fts :string ,@(make-fts-search-sql fts)) args) args)))
                `(query ,(make-sql slots args-with-fts)
                        :types ',(mapcar #'cons-type-from-list args-with-fts)
                        :result-types ',(mapcan #'inflated-type-from-list slots)

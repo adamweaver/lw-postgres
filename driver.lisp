@@ -46,7 +46,7 @@
             do (setf sql (concatenate 'string sql a))
           finally (return (list sql index (nreverse oids) (nreverse type-list))))))
 
-(defun prepare (database name query types result-types)
+(defun do-prepare (database name query types result-types)
   (destructuring-bind (sql nelems oid-list type-list) (prepare-sql-and-oids (flatten (mklist query)) types)
     (with-dynamic-foreign-objects ((oids oid :nelems nelems :initial-contents oid-list))
       (let ((result (prepare (database-handle database) (or name "") sql nelems oids)))
@@ -84,7 +84,7 @@
 
 (defun memoise-prepared-statement (database sql name types result-types)
   (or (gethash name (database-cache database))
-      (setf (gethash name (database-cache database)) (prepare database name sql types result-types))))
+      (setf (gethash name (database-cache database)) (do-prepare database name sql types result-types))))
 
 (defun query (sql &key name types result-types params flatten vector)
   (flet ((process (results)
@@ -97,7 +97,7 @@
                  (query-once *db* sql types result-types params)))))
 
 (defun query-once (database sql types result-types params)
-  (let ((ps (prepare database "" sql types result-types)))
+  (let ((ps (do-prepare database "" sql types result-types)))
     (prog1 (query-statement ps params)
       (unprepare ps))))
 

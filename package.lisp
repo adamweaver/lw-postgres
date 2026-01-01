@@ -1,3 +1,3 @@
 (defpackage :pg
-  (:use :cl :ffi)
+  (:use :cl :fli :utils)
   (:export "ID" "QUERY" "QUERY-ONCE" "WITH-DATABASE" "DEFMODEL"))
